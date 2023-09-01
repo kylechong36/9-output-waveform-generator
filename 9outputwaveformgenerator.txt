@@ -1,0 +1,846 @@
+/* This will be the code that will be used on an Arduino Uno to facilitate the Waveform generators
+ *  We will be using an Arduino UNO and SPI interface to talk to multiple microcontrollers to control properties
+ *  like waveform, frequency, DC Offset, and Amplitude. We will also be using the AD9833BRMZ to create the output waveforms
+ *  So far this code will be used to adjust a singular waveform generator but will be edited in the future to adjust all 9
+ *  For the amplitude calculation we will be using a programmable OP AMP, MCP6S91 which uses SPI
+ *  For the DC offset we will use a U/D potentiometer and OP AMP controlled by an ATMEGA328p 
+ *  Just a note I need to add all the CS/SS to the coding whenever I do design the final prototype
+ *  Last edited 8/27/2023 by Kyle Chong */
+
+// This enables SPI on the Uno
+#include <SPI.h>
+
+// Global variables that will be used throughout the code
+int waveform;
+unsigned long frequency;
+int generator;
+int Amplitude;
+uint16_t controlRegister;
+uint8_t low;
+unsigned long freq_reg;
+int si;
+int phase;
+int freq_cont;
+
+void setup() {
+  // put your setup code here, to run once:
+
+  // This code sets up the Arduino Rev3
+  pinMode(A2, OUTPUT);
+  pinMode(A3, OUTPUT);
+  pinMode(A4, OUTPUT);
+  pinMode(A5, OUTPUT);
+  pinMode(2, OUTPUT);
+  pinMode(3, OUTPUT);
+  pinMode(4, OUTPUT);
+  pinMode(5, OUTPUT);
+  pinMode(6, OUTPUT);
+  pinMode(7, OUTPUT);
+  pinMode(8, OUTPUT);
+  pinMode(9, OUTPUT);
+
+  SPI.begin();         // Enables SPI transfer on the UNO
+  Serial.begin(9600);  // Sets the speed of the Serial transfer
+
+  digitalWrite(A2, LOW);
+  digitalWrite(A3, LOW);
+  digitalWrite(A4, LOW);
+  digitalWrite(A5, LOW);
+  digitalWrite(2, LOW);
+  digitalWrite(3, LOW);
+  digitalWrite(4, LOW);
+  digitalWrite(5, LOW);
+  digitalWrite(6, LOW);
+  digitalWrite(7, LOW);
+  digitalWrite(8, LOW);
+  digitalWrite(9, LOW);
+
+  generator_conf();
+  turnOn();
+  waveform_conf();
+  frequency_conf();
+  amplitude_conf();
+  
+}
+// void loop
+void loop() {
+  // put your main code here, to run repeatedly:
+
+  int i = 1;
+  int status;
+
+  // main menu to configure device
+  while (i == 1) {
+
+    Serial.println("Would you like to change any settings");
+    Serial.println("1. Waveform");
+    Serial.println("2. Frequency");
+    Serial.println("3. Amplitude");
+    Serial.println("4. Phase");
+    Serial.println("5. Reset");
+    Serial.println("6. End");
+    Serial.println("7. Switch generators");
+
+    while (Serial.available() != 0) {
+      Serial.read();
+    }
+
+    while (Serial.available() == 0) {
+    }
+    status = Serial.parseInt();
+
+    //Input validation
+    while (status > 7 or status < 1) {
+      Serial.println("Error invalid input");
+      Serial.println("1. Waveform");
+      Serial.println("2. Frequency");
+      Serial.println("3. Amplitude");
+      Serial.println("4. Phase");
+      Serial.println("5. Reset");
+      Serial.println("6. End current generator");
+      Serial.println("7. Switch generators");
+      while (Serial.available() != 0) {
+       Serial.read();
+      }
+
+      while (Serial.available() == 0) {
+      }
+      status = Serial.parseInt();
+
+    }
+    // Result of the user input
+    switch (status) {
+
+      case 1:
+
+        waveform_conf();
+        break;
+
+      case 2:
+
+        frequency_conf();
+        break;
+
+      case 3:
+
+        amplitude_conf();
+        break;
+
+      /*case 4:
+
+        phase_conf();
+        break; */
+
+      case 5:
+
+        reset_conf();
+        break;
+
+      case 6:
+
+        end_conf();
+        i = i--;
+        Serial.print("Waveform generator # ");
+        Serial.print(generator);
+        Serial.print(" Shutting down");
+        break;
+
+      case 7:
+
+        generator_conf();
+        Serial.println("Switching Generators");
+        break;
+    }
+  }
+}
+
+// This function will turn on the AD9833BRMZ
+void turnOn() {
+
+  // Text that informs user which generator is being edited
+  Serial.print("Turning on Function Generator #");
+  Serial.println(generator);  
+}
+
+// This function exits the frequency and phase register
+void finish() {
+
+  delay(100);
+  SPI.transfer16(low);  // Writes 0x00 + the low bytes to the
+
+  close();
+}
+
+// This function will change the waveform of the waveform generator
+void wave_switch() {
+
+  fcso();
+
+  Serial.println(waveform);
+
+  switch (waveform) {
+
+    // Case for the square waveform
+    case 1:
+
+      low = 0x20;           // Sets the low bytes to 0b'0010 0000
+      SPI.transfer(0);  // Sends the bytes to be transfered through SPI
+      delay(50);
+      SPI.transfer(low);
+      break;
+
+    // Case for the sine waveform
+    case 2:
+
+      low = 0x00;           // Sets the low bytes to 0b'0000 0000
+      SPI.transfer(0);
+      delay(50);
+      SPI.transfer(low);  // Sends the bytes to be transfered through SPI
+      break;
+
+
+    // Case for the triangle waveform
+    case 3:
+
+      low = 0x02;           // Sets the low bytes to 0b'0000 0010
+      SPI.transfer(0);
+      delay(50);
+      SPI.transfer(low);  // Sends the bytes to be transfered through SPI
+      break;
+  }
+
+  close();
+}
+
+// This function inputs the frequency into the SPI
+void frequency_reg() {
+
+  fcso();
+
+  controlRegister = 0x2100 | low;
+  SPI.transfer16(controlRegister);
+
+   // Sends and recieves frequency for the function
+
+  frequency_calc();
+
+  uint16_t high = freq_reg >> 14;    // Splits the bytes to the high 14 bytes
+  uint16_t low = freq_reg & 0x3FFF;  // Splits the bytes to the low 14 bytes
+
+  high |= 0x4000;  // Sets the 15th byte to 1
+  low |= 0x4000;   // Sets the 15th byte to 1
+
+  delay(100);
+
+  while (freq_cont > 0) {
+
+    high = high + 0x0004;
+    freq_cont--;
+  }
+
+  /*switch(freq_cont) {
+
+    case 0:
+
+      high |= 0x0000;
+      break;
+
+    case 1:
+
+      high |= 0x0004;
+      break;
+
+    case 2:
+
+      high |= 0x0008;
+      break;
+
+    case 3:
+
+      high |= 0x000C;
+      break;
+
+    case 4:
+
+      high |= 0x0014;
+      break;
+
+    case 5:
+
+      high |= 0x018;
+      break;
+
+    case 6:
+
+      high |= 0x01C;
+  
+  }
+  */
+  SPI.transfer16(high);
+  delay(100);
+  SPI.transfer16(low);
+
+  
+  finish();
+}
+
+// This function calculates the function
+int frequency_calc() {
+
+  freq_reg = (frequency * 11);  //Formula used to calculate frequency output
+}
+
+void phase_switch() {
+
+  fcso();
+
+  controlRegister = 0x2100 | low;
+  SPI.transfer16(controlRegister);
+
+  uint16_t low = phase;
+
+  low |= 0xC000;
+
+  delay(100);
+  SPI.transfer16(low);
+
+  finish();
+
+}
+
+// This funciton will control the potentiometer which will determine the amplitude of the generator
+void amp_switch() {
+
+  ocso();
+  //This sets the OP-AMP to gain mode
+  SPI.transfer(0x40);
+  delay(100);
+
+  // This switch statement determines which gain is being implemented (1 - 32V/V)
+  switch (Amplitude) {
+
+    case 0:
+
+      SPI.transfer(0x00);
+      break;
+
+    case 1:
+
+      SPI.transfer(0x01);
+      break;
+
+    case 2:
+
+      SPI.transfer(0x02);
+      break;
+
+    case 3:
+
+      SPI.transfer(0x03);
+      break;
+
+    case 4:
+
+      SPI.transfer(0x04);
+      break;
+
+    case 5:
+
+      SPI.transfer(0x05);
+      break;
+
+    case 6:
+
+      SPI.transfer(0x06);
+      break;
+
+    case 7:
+
+      SPI.transfer(0x07);
+      break;
+  }
+  delay(100);
+  close();
+}
+
+// This function will prompt the user to enter the desired waveform
+void waveform_conf() {
+
+  Serial.println("Enter desired waveform");
+  Serial.println("1. Square");
+  Serial.println("2. Sine");
+  Serial.println("3. Triangle");
+
+
+  while (Serial.available() != 0) {
+    Serial.read();
+  }
+
+  while (Serial.available() == 0) {
+  }
+
+  waveform = Serial.parseInt();  // Function that asks user for waveform input
+
+  // Input validation
+  while (waveform < 1 or waveform > 3) {
+
+    Serial.println("Error invalid input");
+    Serial.println("Enter desired waveform");
+    Serial.println("1. Square");
+    Serial.println("2. Sine");
+    Serial.println("3. Triangle");
+    while (Serial.available() != 0) {
+      Serial.read();
+    }
+
+    while (Serial.available() == 0) {
+    }
+
+    waveform = Serial.parseInt(); 
+  }
+
+  wave_switch();
+}
+
+// This function will prompt the user to enter the desired frequency
+void frequency_conf() {
+
+  Serial.println("Enter desired frequency");
+  Serial.println("0-2.5 GHZ")
+;
+  while (Serial.available() != 0) {
+    Serial.read();
+  }
+
+  while (Serial.available() == 0) {
+  }
+
+  frequency = Serial.parseInt();
+  freq_cont = frequency/2978;
+
+  // Input validation
+  while (frequency < 1 or frequency > 2500000) {
+
+    Serial.println("Error invalid input");
+    Serial.println("Enter desired frequency");
+    Serial.println("0-2.5 GHZ");
+
+    while (Serial.available() != 0) {
+    Serial.read();
+    }
+
+    while (Serial.available() == 0) {
+    }
+
+    frequency = Serial.parseInt();
+  }
+
+  Serial.println("If value is above 3000, please input the desired value - value of closest factor of 3000");
+  Serial.println("If desired value is less then 3000 just enter the value");
+  Serial.println("For example to get a frequency of 2000, enter 2000");
+  Serial.println("Another example if desired frequency is 14000, enter 2000 as well (14000-12000");
+
+  while (Serial.available() != 0) {
+    Serial.read();
+  }
+
+  while (Serial.available() == 0) {
+  }
+
+  frequency = Serial.parseInt();
+
+  while (frequency < 1 or frequency > 3000) {
+
+    Serial.println("If value is above 3000, please input the desired value - value of closest factor of 3000");
+    Serial.println("If desired value is less then 3000 just enter the value");
+    Serial.println("For example to get a frequency of 2000, enter 2000");
+    Serial.println("Another example if desired frequency is 14000, enter 2000 as well (14000-12000");
+
+    while (Serial.available() != 0) {
+    Serial.read();
+    }
+
+    while (Serial.available() == 0) {
+    }
+
+    frequency = Serial.parseInt();
+  }
+
+  Serial.println("Selected frequency is");
+  Serial.println(frequency);
+ 
+  frequency_reg();
+}
+
+// Function that prompts user for the amplitude
+void amplitude_conf() {
+
+  Serial.println("Select desired amplitude");
+  Serial.println("1. 1V/V, 2. 2V/V, 3. 4V/V, 4. 5V/V, 5. 8V/V, 6. 10V/V, 7. 16V/V, 8. 32V/V");
+
+  while (Serial.available() != 0) {
+    Serial.read();
+  }
+
+  while (Serial.available() == 0) {
+  }
+
+  Amplitude = Serial.parseInt();
+  while (Amplitude < 1 or Amplitude > 8) {
+
+    Serial.println("Error invalid input");
+    Serial.println("Select desired amplitude");
+    Serial.println("1. 1V/V, 2. 2V/V, 3. 4V/V, 4. 5V/V, 5. 8V/V, 6. 10V/V, 7. 16V/V, 8. 32V/V");
+    while (Serial.available() != 0) {
+      Serial.read();
+    }
+
+    while (Serial.available() == 0) {
+    }
+
+    Amplitude = Serial.parseInt();
+  }
+
+  amp_switch();
+}
+
+// Function that resets the AD9833BRMZ
+void reset_conf() {
+
+  fcso();
+
+  // Resets AD9833BRMZ
+  controlRegister = 0x0000;
+  SPI.transfer16(0x0000);
+
+  close();
+
+}
+
+// Function that turns off the AD9833BRMZ
+void end_conf() {
+
+  fcso();
+
+  // Turns off current AD9833BRMZ
+  SPI.transfer16(0x00C0);
+
+  close();
+
+  // Turns off current Gain OP-AMP
+  ocso();
+
+  SPI.transfer(0x20);
+  SPI.end();
+
+  close();
+}
+
+// Function that switches to the desired generator
+void generator_conf() {
+
+  Serial.println("Which generator would you like to edit");
+  Serial.println("Generators 1-9");
+
+  while (Serial.available() != 0) {
+    Serial.read();
+  }
+
+  while (Serial.available() == 0) {
+  }
+  generator = Serial.parseInt();
+
+  while (generator < 1 or generator > 9) {
+    Serial.println("Error Invalid input");
+    Serial.println("Which generator would you like to edit");
+    Serial.println("Generators 1-9");
+    while (Serial.available() != 0) {
+    Serial.read();
+    }
+
+    while (Serial.available() == 0) { 
+    }
+
+    generator = Serial.parseInt();
+  }
+}
+
+void phase_conf() {
+
+  Serial.println("How would you like to change the phase");
+  Serial.println("0-4095, 0 = no phase change 4095 2pi phase change");
+
+  while (Serial.available() != 0) {
+    Serial.read(); 
+  }
+
+  while (Serial.available() == 0) {    
+  }
+
+  phase = Serial.parseInt();
+
+  while (phase < 0 or phase > 4095) {
+    Serial.println("Error Invalid input");
+    Serial.println("How would you like to change the phase");
+     Serial.println("0-4095, 0 = no phase change 4095 2pi phase change");
+
+    while (Serial.available() != 0) {
+      Serial.read(); 
+    }
+
+    while (Serial.available() == 0) {    
+    }
+
+    phase = Serial.parseInt();
+  }
+
+  phase_switch();
+}
+// This function selects the chip select based upon the generator (function generator)
+void fcso() {
+
+  switch (generator) {
+
+    case (1):
+
+      digitalWrite(A2, LOW);
+      digitalWrite(A3, LOW);
+      digitalWrite(A4, LOW);
+      digitalWrite(A5, HIGH);
+      break;
+
+    case (2):
+
+      digitalWrite(A2, LOW);
+      digitalWrite(A3, LOW);
+      digitalWrite(A4, HIGH);
+      digitalWrite(A5, LOW);
+      break;
+
+    case (3):
+
+      digitalWrite(A2, LOW);
+      digitalWrite(A3, LOW);
+      digitalWrite(A4, HIGH);
+      digitalWrite(A5, HIGH);
+      break;
+
+    case (4):
+
+      digitalWrite(5, LOW);
+      digitalWrite(4, LOW);
+      digitalWrite(3, LOW);
+      digitalWrite(2, HIGH);
+      break;
+
+    case (5):
+
+      digitalWrite(5, LOW);
+      digitalWrite(4, LOW);
+      digitalWrite(3, HIGH);
+      digitalWrite(2, LOW);
+      break;
+
+    case (6):
+
+      digitalWrite(5, LOW);
+      digitalWrite(4, LOW);
+      digitalWrite(3, HIGH);
+      digitalWrite(2, HIGH);
+      break;
+
+    case (7):
+
+      digitalWrite(9, LOW);
+      digitalWrite(8, LOW);
+      digitalWrite(7, LOW);
+      digitalWrite(6, HIGH);
+      break;
+
+    case (8):
+
+      digitalWrite(9, LOW);
+      digitalWrite(8, LOW);
+      digitalWrite(7, HIGH);
+      digitalWrite(6, LOW);
+      break;
+
+    case (9):
+
+      digitalWrite(9, LOW);
+      digitalWrite(8, LOW);
+      digitalWrite(7, HIGH);
+      digitalWrite(6, HIGH);
+      break;
+  }
+
+  SPI.beginTransaction(SPISettings(SPI_CLOCK_DIV128, MSBFIRST, SPI_MODE2));
+  delay(500);
+}
+
+// This function closes the chip select based upon the generator (function generator)
+void close() {
+
+  delay(300);
+
+  switch (generator) {
+
+    case (1):
+
+      digitalWrite(A2, LOW);
+      digitalWrite(A3, LOW);
+      digitalWrite(A4, LOW);
+      digitalWrite(A5, LOW);
+      break;
+
+    case (2):
+
+      digitalWrite(A2, LOW);
+      digitalWrite(A3, LOW);
+      digitalWrite(A4, LOW);
+      digitalWrite(A5, LOW);
+      break;
+
+    case (3):
+
+      digitalWrite(A2, LOW);
+      digitalWrite(A3, LOW);
+      digitalWrite(A4, LOW);
+      digitalWrite(A5, LOW);
+      break;
+
+    case (4):
+
+      digitalWrite(5, LOW);
+      digitalWrite(4, LOW);
+      digitalWrite(3, LOW);
+      digitalWrite(2, LOW);
+      break;
+
+    case (5):
+
+      digitalWrite(5, LOW);
+      digitalWrite(4, LOW);
+      digitalWrite(3, LOW);
+      digitalWrite(2, LOW);
+      break;
+
+    case (6):
+
+      digitalWrite(5, LOW);
+      digitalWrite(4, LOW);
+      digitalWrite(3, LOW);
+      digitalWrite(2, LOW);
+      break;
+
+    case (7):
+
+      digitalWrite(9, LOW);
+      digitalWrite(8, LOW);
+      digitalWrite(7, LOW);
+      digitalWrite(6, LOW);
+      break;
+
+    case (8):
+
+      digitalWrite(9, LOW);
+      digitalWrite(8, LOW);
+      digitalWrite(7, LOW);
+      digitalWrite(6, LOW);
+      break;
+
+    case (9):
+
+      digitalWrite(9, LOW);
+      digitalWrite(8, LOW);
+      digitalWrite(7, LOW);
+      digitalWrite(6, LOW);
+      break;
+  }
+
+  SPI.endTransaction();
+  delay(100);
+}
+
+// This function selects the chip select based upon the generator (PG OP-Amp)
+void ocso() {
+
+  switch (generator) {
+
+    case (1):
+
+      digitalWrite(A2, LOW);
+      digitalWrite(A3, HIGH);
+      digitalWrite(A4, LOW);
+      digitalWrite(A5, LOW);
+      break;
+
+    case (2):
+
+      digitalWrite(A2, LOW);
+      digitalWrite(A3, HIGH);
+      digitalWrite(A4, LOW);
+      digitalWrite(A5, HIGH);
+      break;
+
+    case (3):
+
+      digitalWrite(A2, LOW);
+      digitalWrite(A3, HIGH);
+      digitalWrite(A4, HIGH);
+      digitalWrite(A5, LOW);
+      break;
+
+    case (4):
+
+      digitalWrite(5, LOW);
+      digitalWrite(4, HIGH);
+      digitalWrite(3, LOW);
+      digitalWrite(2, LOW);
+      break;
+
+    case (5):
+
+      digitalWrite(5, LOW);
+      digitalWrite(4, HIGH);
+      digitalWrite(3, LOW);
+      digitalWrite(2, HIGH);
+      break;
+
+    case (6):
+
+      digitalWrite(5, LOW);
+      digitalWrite(4, HIGH);
+      digitalWrite(3, HIGH);
+      digitalWrite(2, LOW);
+      break;
+
+    case (7):
+
+      digitalWrite(9, LOW);
+      digitalWrite(8, HIGH);
+      digitalWrite(7, LOW);
+      digitalWrite(6, LOW);
+      break;
+
+    case (8):
+
+      digitalWrite(9, LOW);
+      digitalWrite(8, HIGH);
+      digitalWrite(7, LOW);
+      digitalWrite(6, HIGH);
+      break;
+
+    case (9):
+
+      digitalWrite(9, LOW);
+      digitalWrite(8, HIGH);
+      digitalWrite(7, HIGH);
+      digitalWrite(6, LOW);
+      break;
+  }
+
+  SPI.beginTransaction(SPISettings(SPI_CLOCK_DIV2, MSBFIRST, SPI_MODE0));
+  delay(500);
+
+}
