@@ -1,0 +1,4 @@
+This code gives an unfinished version to control an Arduino UNO REV3. The REV3 will then control an ATMega328p that will also control an 
+AD9833BRMZ. We will be controlling the ATMega328p with Parallel interface and the AD9833BRMZ with SPI. There will also be a PGA (Programmable Gain OP-AMP)
+that will be coded using SPI. After the outputted waveform will eventually go through an amplifier which will eventually go to a load. The project was designed 
+to be completely computer controlled and eventually fitted to a PCB.
